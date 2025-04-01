@@ -1,0 +1,85 @@
+import os
+import streamlit as st
+from dotenv import load_dotenv
+from doc_load import upsert_docs
+from pinecone import Pinecone as PineconeClient, ServerlessSpec
+from transformers import AutoTokenizer, AutoModel
+import torch 
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+
+# Retrieve API keys
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_HOST = os.getenv("PINECONE_HOST")
+INDEX_NAME = os.getenv("INDEX_NAME")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME")
+
+NUMBER_OF_RESULT = 3
+
+
+# Initialize Pinecone with the new method
+pc = PineconeClient(
+    api_key=PINECONE_API_KEY 
+)
+
+
+# Ensure the index exists or create it
+if INDEX_NAME not in pc.list_indexes().names():
+    pc.create_index(
+        name=INDEX_NAME,
+        dimension=384,  # Adjust dimension based on your use case
+        metric='cosine',
+        spec=ServerlessSpec(
+        cloud="aws",
+        region="us-east-1"
+    )
+    )
+
+# Initialize Pinecone index
+index = pc.Index(INDEX_NAME)
+
+# HuggingFace embedding model
+tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME, use_fast=True, clean_up_tokenization_spaces=False)
+model = AutoModel.from_pretrained(EMBED_MODEL_NAME)
+
+def embed_text(text):
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True)
+    with torch.no_grad():
+        embeddings = model(**inputs).last_hidden_state.mean(dim=1)
+    return embeddings.numpy()
+
+# Function to query the model and Pinecone
+def run_llm(query: str):
+    query_embedding = embed_text(query)
+    response = index.query(vector=query_embedding.tolist(), top_k=NUMBER_OF_RESULT, include_metadata=True)
+    context = " ".join([match['metadata']['text'] for match in response['matches']])
+    
+    return context
+
+# Streamlit UI
+
+st.title("Interactive Guide")
+st.write("Ask a question and get relevant information.")
+
+query = st.text_input("Enter your question:")
+if st.button("Submit"):
+    if query:
+        response = run_llm(query)
+        st.write("Answer:")
+        st.write(response)
+    else:
+        st.error("Please enter a question.")
+
+# Upload section
+st.header("Upload Files")
+uploaded_file = st.file_uploader("Choose a file", type=["txt", "pdf", "docx"])
+
+if uploaded_file is not None:
+    file_path = os.path.join("uploads", uploaded_file.name)
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    upsert_docs(file_path)
+    st.success("File uploaded and processed successfully!")
